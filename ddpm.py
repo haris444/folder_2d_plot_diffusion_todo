@@ -20,11 +20,11 @@ class BaseScheduler(nn.Module):
     """
 
     def __init__(
-        self,
-        num_train_timesteps: int,
-        beta_1: float = 1e-4,
-        beta_T: float = 0.02,
-        mode: str = "linear",
+            self,
+            num_train_timesteps: int,
+            beta_1: float = 1e-4,
+            beta_T: float = 0.02,
+            mode: str = "linear",
     ):
         super().__init__()
         self.num_train_timesteps = num_train_timesteps
@@ -36,7 +36,7 @@ class BaseScheduler(nn.Module):
             betas = torch.linspace(beta_1, beta_T, steps=num_train_timesteps)
         elif mode == "quad":
             betas = (
-                torch.linspace(beta_1**0.5, beta_T**0.5, num_train_timesteps) ** 2
+                    torch.linspace(beta_1 ** 0.5, beta_T ** 0.5, num_train_timesteps) ** 2
             )
         else:
             raise NotImplementedError(f"{mode} is not implemented.")
@@ -83,12 +83,9 @@ class DiffusionModule(nn.Module):
         if noise is None:
             noise = torch.randn_like(x0)
 
-        ######## TODO ########
-        # Assignment -- Compute xt.
+        # Forward diffusion process: x_t = sqrt(α̅_t) * x_0 + sqrt(1 - α̅_t) * ε
         alphas_prod_t = extract(self.var_scheduler.alphas_cumprod, t, x0)
-        xt = x0
-
-        #######################
+        xt = torch.sqrt(alphas_prod_t) * x0 + torch.sqrt(1 - alphas_prod_t) * noise
 
         return xt
 
@@ -100,22 +97,31 @@ class DiffusionModule(nn.Module):
         Input:
             xt (`torch.Tensor`): samples at arbitrary timestep t.
             t (`torch.Tensor`): current timestep in a reverse process.
-        Ouptut:
+        Output:
             x_t_prev (`torch.Tensor`): one step denoised sample. (= x_{t-1})
 
         """
-        ######## TODO ########
-        # Assignment -- compute x_t_prev.
         if isinstance(t, int):
             t = torch.tensor([t]).to(self.device)
-        eps_factor = (1 - extract(self.var_scheduler.alphas, t, xt)) / (
-            1 - extract(self.var_scheduler.alphas_cumprod, t, xt)
-        ).sqrt()
+
+        # Predict noise using the network
         eps_theta = self.network(xt, t)
 
-        x_t_prev = xt
+        # Calculate the mean of the reverse process
+        eps_factor = (1 - extract(self.var_scheduler.alphas, t, xt)) / (
+                1 - extract(self.var_scheduler.alphas_cumprod, t, xt)
+        ).sqrt()
 
-        #######################
+        mean = (xt - eps_factor * eps_theta) / extract(self.var_scheduler.alphas, t, xt).sqrt()
+
+        # Add noise if not at the final step (t > 0)
+        if t[0].item() > 0:  # Check the first element since all elements should be the same timestep
+            posterior_variance = extract(self.var_scheduler.betas, t, xt)
+            noise = torch.randn_like(xt)
+            x_t_prev = mean + posterior_variance.sqrt() * noise
+        else:
+            x_t_prev = mean
+
         return x_t_prev
 
     @torch.no_grad()
@@ -128,11 +134,15 @@ class DiffusionModule(nn.Module):
         Output:
             x0_pred (`torch.Tensor`): The final denoised output through the DDPM reverse process.
         """
-        ######## TODO ########
-        # Assignment -- sample x0 based on Algorithm 2 of DDPM paper.
-        x0_pred = torch.zeros(shape).to(self.device)
+        # Start from pure noise
+        x = torch.randn(shape).to(self.device)
 
-        ######################
+        # Iteratively denoise from T to 0
+        for i in reversed(range(self.var_scheduler.num_train_timesteps)):
+            t = torch.full((shape[0],), i, device=self.device, dtype=torch.long)
+            x = self.p_sample(x, t)
+
+        x0_pred = x
         return x0_pred
 
     def compute_loss(self, x0):
@@ -144,18 +154,22 @@ class DiffusionModule(nn.Module):
         Output:
             loss: the computed loss to be backpropagated.
         """
-        ######## TODO ########
-        # Assignment -- compute noise matching loss.
         batch_size = x0.shape[0]
-        t = (
-            torch.randint(0, self.var_scheduler.num_train_timesteps, size=(batch_size,))
-            .to(x0.device)
-            .long()
-        )
+        # Sample random timesteps for each sample in the batch
+        t = torch.randint(0, self.var_scheduler.num_train_timesteps, size=(batch_size,)).to(x0.device).long()
 
-        loss = x0.mean()
+        # Sample noise
+        noise = torch.randn_like(x0)
 
-        ######################
+        # Apply forward diffusion to get noisy samples
+        xt = self.q_sample(x0, t, noise)
+
+        # Predict the noise
+        eps_theta = self.network(xt, t)
+
+        # Compute MSE loss between predicted and actual noise
+        loss = F.mse_loss(eps_theta, noise)
+
         return loss
 
     def save(self, file_path):
