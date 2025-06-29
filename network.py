@@ -80,20 +80,17 @@ class SimpleNet(nn.Module):
             dim_hids: dimensions of hidden features
             num_timesteps: number of timesteps
         """
+
         self.dim_in = dim_in
         self.dim_out = dim_out
         self.num_timesteps = num_timesteps
-
-        # Build a sequence of TimeLinear layers with SiLU activations
-        layers = []
+        # timelinear & silu
         dims = [dim_in] + dim_hids + [dim_out]
-
-        for i in range(len(dims) - 1):
-            layers.append(TimeLinear(dims[i], dims[i + 1], num_timesteps))
-            if i < len(dims) - 2:  # Don't add activation after last layer
-                layers.append(nn.SiLU())
-
-        self.layers = nn.ModuleList(layers)
+        self.layers = nn.ModuleList([
+            layer for i in range(len(dims) - 1)
+            for layer in [TimeLinear(dims[i], dims[i + 1], num_timesteps)] +
+                         ([nn.SiLU()] if i < len(dims) - 2 else []) # no activation for last layer
+        ])
 
     def forward(self, x: torch.Tensor, t: torch.Tensor):
         """
@@ -104,7 +101,7 @@ class SimpleNet(nn.Module):
             x: the noisy data after t period diffusion
             t: the time that the forward diffusion has been running
         """
-        # Pass through all layers, applying time conditioning to TimeLinear layers
+        # add t to timelinear layers
         for layer in self.layers:
             if isinstance(layer, TimeLinear):
                 x = layer(x, t)
